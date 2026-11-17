@@ -1,0 +1,30 @@
+name: build
+
+on:
+  push: { branches: [main] }
+  pull_request:
+
+jobs:
+  native-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: g++ -std=c++17 -O1 -Wall -Wextra -o json_test tests/json_test.cpp src/json.cpp && ./json_test
+      - run: g++ -std=c++17 -O1 -Wall -Wextra -o netutil_test tests/netutil_test.cpp src/netutil.cpp && ./netutil_test
+      - run: g++ -std=c++17 -O1 -Wall -Wextra -Isrc -o config_test tests/config_test.cpp src/hotkey.cpp && ./config_test
+
+  windows-integration:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python tools/make_icon.py
+      - run: cmake -S . -B build-tests -A x64
+      - run: cmake --build build-tests --config Release
+      - run: ctest --test-dir build-tests -C Release --output-on-failure
+
+  mingw:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python tools/make_icon.py
+      - run: C:\msys64\usr\bin\bash -lc "cd '$PWD' && x86_64-w64-mingw32-g++ -std=c++17 -O2 -Wall -Wextra -Isrc -Ires -mwindows -municode -static -o crowman_study.exe src/*.cpp res/app.rc -lwinhttp -lgdiplus -lbcrypt -lcrypt32 -ldbghelp -lshcore -ldwmapi -lcomctl32 -lshell32 -lole32 -luser32 -lgdi32 -ladvapi32 -lws2_32"

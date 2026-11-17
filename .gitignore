@@ -1,0 +1,8 @@
+build/
+build-tests/
+dist/
+old-drop/
+.venv/
+.vs/
+*.user
+res/crowman.ico

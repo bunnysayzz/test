@@ -1,0 +1,12 @@
+Portable mode
+=============
+
+Everything lives next to the executable. No install, no registry.
+
+1. Copy crowman_study.exe anywhere writable.
+2. Rename config.sample.ini to config.ini beside the exe.
+3. Run it.
+
+An adjacent config.ini wins over the AppData copy. Secrets are still DPAPI
+sealed, so a portable folder copied to another profile needs the key
+re-entered. History and logs still go to %APPDATA% and %LOCALAPPDATA%.
