@@ -114,7 +114,7 @@ Config LoadConfig() {
     ParseHotkey(ReadIni(path, L"hotkey_copy", L"ctrl+alt+c"), cfg.hotkey_copy);
     ParseHotkey(ReadIni(path, L"hotkey_toggle", L"ctrl+alt+h"), cfg.hotkey_toggle);
 
-    if (cfg.mode != L"broker") cfg.mode = L"openai";
+    if (cfg.mode != L"broker" && cfg.mode != L"parity") cfg.mode = L"openai";
     if (cfg.max_width_px != 0 && cfg.max_width_px < 320) cfg.max_width_px = 320;
     if (cfg.max_height_px != 0 && cfg.max_height_px < 200) cfg.max_height_px = 200;
     if (cfg.timeout_ms < 5000) cfg.timeout_ms = 5000;
@@ -179,6 +179,7 @@ bool OpenConfigInEditor() {
 }
 
 bool IsConfigured(const Config& cfg) {
+    if (cfg.mode == L"parity") return true;  // built-in token + endpoint, no user secrets
     const Secrets& secrets = CurrentSecrets();
     return !cfg.endpoint.empty() &&
            !(cfg.mode == L"broker" ? secrets.license_key : secrets.api_key).empty();

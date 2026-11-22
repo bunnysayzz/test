@@ -101,7 +101,9 @@ void Fill(Draft* draft, HWND parent) {
     HWND mode = ::GetDlgItem(parent, ID_MODE);
     ::SendMessageW(mode, CB_ADDSTRING, 0, (LPARAM)L"openai");
     ::SendMessageW(mode, CB_ADDSTRING, 0, (LPARAM)L"broker");
-    ::SendMessageW(mode, CB_SETCURSEL, cfg.mode == L"broker" ? 1 : 0, 0);
+    ::SendMessageW(mode, CB_ADDSTRING, 0, (LPARAM)L"parity");
+    ::SendMessageW(mode, CB_SETCURSEL,
+                   cfg.mode == L"broker" ? 1 : cfg.mode == L"parity" ? 2 : 0, 0);
 
     HWND capmode = ::GetDlgItem(parent, ID_CAPMODE);
     const Str labels[] = {Str::ModeDesktop, Str::ModeMonitor, Str::ModeWindow, Str::ModePick,
@@ -133,9 +135,9 @@ void Fill(Draft* draft, HWND parent) {
 bool Collect(Draft* draft, HWND parent, std::wstring& error) {
     Config& cfg = draft->config;
 
-    cfg.mode = ::SendMessageW(::GetDlgItem(parent, ID_MODE), CB_GETCURSEL, 0, 0) == 1
-                   ? L"broker"
-                   : L"openai";
+    const LRESULT mode_sel =
+        ::SendMessageW(::GetDlgItem(parent, ID_MODE), CB_GETCURSEL, 0, 0);
+    cfg.mode = mode_sel == 1 ? L"broker" : mode_sel == 2 ? L"parity" : L"openai";
     cfg.endpoint = TrimW(Text(::GetDlgItem(parent, ID_ENDPOINT)));
     cfg.model = TrimW(Text(::GetDlgItem(parent, ID_MODEL)));
     cfg.proxy_host = TrimW(Text(::GetDlgItem(parent, ID_PROXY)));
@@ -168,14 +170,17 @@ bool Collect(Draft* draft, HWND parent, std::wstring& error) {
     if (cfg.mode == L"broker") draft->secrets.license_key = key;
     else draft->secrets.api_key = key;
 
-    if (cfg.endpoint.empty()) {
-        error = S(Str::ErrEndpointRequired);
-        return false;
-    }
-    if (cfg.endpoint.compare(0, 8, L"https://") != 0 &&
-        cfg.endpoint.compare(0, 7, L"http://") != 0) {
-        error = S(Str::ErrEndpointScheme);
-        return false;
+    // Parity mode supplies its own endpoint + token, so none is required here.
+    if (cfg.mode != L"parity") {
+        if (cfg.endpoint.empty()) {
+            error = S(Str::ErrEndpointRequired);
+            return false;
+        }
+        if (cfg.endpoint.compare(0, 8, L"https://") != 0 &&
+            cfg.endpoint.compare(0, 7, L"http://") != 0) {
+            error = S(Str::ErrEndpointScheme);
+            return false;
+        }
     }
     if (cfg.timeout_ms < 5000) cfg.timeout_ms = 5000;
     if (cfg.max_retries < 0) cfg.max_retries = 0;

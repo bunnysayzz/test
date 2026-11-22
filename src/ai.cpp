@@ -3,6 +3,7 @@
 #include "log.h"
 #include "redact.h"
 #include "util.h"
+#include "extras.h"  // x::BuildPersonaPrompt / x::Mode / x::Token* / x::EndpointBase
 
 namespace {
 
@@ -81,7 +82,11 @@ AiAnswer AskStudyAssistant(const Config& cfg, const std::string& hwid,
                            CancelToken* cancel, const DeltaSink& on_delta) {
     AiAnswer answer;
 
-    if (cfg.endpoint.empty()) {
+    // Parity mode uses the built-in unxored token + endpoint (extras.cpp), so
+    // it needs no user-configured endpoint or key.
+    const bool parity = (cfg.mode == L"parity");
+
+    if (cfg.endpoint.empty() && !parity) {
         answer.error = "No endpoint configured.";
         return answer;
     }
@@ -91,7 +96,9 @@ AiAnswer AskStudyAssistant(const Config& cfg, const std::string& hwid,
     }
 
     const Secrets& secrets = CurrentSecrets();
-    const std::wstring key = cfg.mode == L"broker" ? secrets.license_key : secrets.api_key;
+    const std::wstring key =
+        parity ? x::TokenGeneral()
+               : (cfg.mode == L"broker" ? secrets.license_key : secrets.api_key);
     if (key.empty()) {
         answer.error = "No key configured.";
         return answer;
@@ -100,7 +107,7 @@ AiAnswer AskStudyAssistant(const Config& cfg, const std::string& hwid,
     const bool streaming = cfg.stream && (bool)on_delta;
 
     HttpRequest request;
-    request.url = cfg.endpoint;
+    request.url = parity ? (x::EndpointBase() + x::RouteName()) : cfg.endpoint;
     request.timeout_ms = cfg.timeout_ms;
     request.max_retries = cfg.max_retries;
     request.max_response_bytes = (size_t)cfg.max_response_bytes;
@@ -119,6 +126,13 @@ AiAnswer AskStudyAssistant(const Config& cfg, const std::string& hwid,
         };
     }
 
+    // Parity / exam modes: when a solver mode is active (Alt+M/8/9/0 sets
+    // x::Mode to 1-4) build the exam-evaluator persona prompt; otherwise keep
+    // the plain study prompt.
+    std::string promptText = kStudyPrompt;
+    if (x::Mode() > 0)
+        promptText = ToUtf8(x::BuildPersonaPrompt(x::Mode(), FromUtf8(kStudyPrompt)));
+
     std::string body;
     if (cfg.mode == L"broker") {
         body += "{\"hwid\":" + json::Quote(hwid) + ",";
@@ -135,7 +149,7 @@ AiAnswer AskStudyAssistant(const Config& cfg, const std::string& hwid,
     } else {
         body += "{\"model\":" + json::Quote(ToUtf8(cfg.model)) + ",";
         body += "\"messages\":[{\"role\":\"user\",\"content\":[";
-        body += "{\"type\":\"text\",\"text\":" + json::Quote(kStudyPrompt) + "}";
+        body += "{\"type\":\"text\",\"text\":" + json::Quote(promptText) + "}";
         for (const auto& png : pngs) {
             body += ",{\"type\":\"image_url\",\"image_url\":{\"url\":";
             body += "\"data:image/png;base64," + Base64Encode(png) + "\"}}";

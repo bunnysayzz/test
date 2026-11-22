@@ -35,7 +35,9 @@ enum : int {
     ID_CTX_CLEAR,
 };
 
-constexpr int HK_CAPTURE = 1, HK_COPY = 2, HK_TOGGLE = 3;
+constexpr int HK_CAPTURE = 1, HK_COPY = 2, HK_TOGGLE = 3,
+    HK_BUFFER = 4,    // Alt+B: add current capture to buffer (parity hotkey)
+    HK_GHOST = 5;     // Alt+T: ghost-type last answer into the foreground app
 constexpr UINT_PTR kElapsed = 1, kBatch = 2;
 
 HWND g_answer, g_status, g_capture, g_copy, g_settings, g_cancel, g_history, g_send,
@@ -216,6 +218,8 @@ void UnregisterHotkeys(HWND hwnd) {
     ::UnregisterHotKey(hwnd, HK_CAPTURE);
     ::UnregisterHotKey(hwnd, HK_COPY);
     ::UnregisterHotKey(hwnd, HK_TOGGLE);
+    ::UnregisterHotKey(hwnd, HK_BUFFER);
+    ::UnregisterHotKey(hwnd, HK_GHOST);
 }
 
 void RegisterHotkeys(HWND hwnd) {
@@ -228,6 +232,8 @@ void RegisterHotkeys(HWND hwnd) {
     one(HK_CAPTURE, g_config.hotkey_capture);
     one(HK_COPY, g_config.hotkey_copy);
     one(HK_TOGGLE, g_config.hotkey_toggle);
+    one(HK_BUFFER, HotkeySpec{MOD_ALT, 'B', true});
+    one(HK_GHOST, HotkeySpec{MOD_ALT, 'T', true});
 }
 
 struct CaptureJob {
@@ -247,7 +253,10 @@ struct AskJob {
 
 void CALLBACK ForegroundEvent(HWINEVENTHOOK, DWORD, HWND window, LONG, LONG, DWORD,
                               DWORD) {
-    if (window) g_last_foreign = window;
+    if (window) {
+        g_last_foreign = window;
+        x::OverlayFollowTarget(window);  // keep the overlay on the foreground app
+    }
 }
 
 void StartAskJob(HWND hwnd);
@@ -398,6 +407,21 @@ void StartAskJob(HWND hwnd) {
     }
 }
 
+struct GhostJob {
+    HWND target;
+    std::wstring text;
+};
+
+// GhostType types keystroke-by-keystroke with Sleep, so it must run off the
+// UI thread. The target is the last foreground (exam) window captured by the
+// WinEvent hook; the text is the remembered answer.
+DWORD WINAPI GhostThread(LPVOID parameter) {
+    std::unique_ptr<GhostJob> job((GhostJob*)parameter);
+    x::TypeOptions opt;  // defaults: humanized delay + jitter, restore focus
+    x::GhostType(job->target, job->text, opt);
+    return 0;
+}
+
 void FinishJob(HWND hwnd, JobOutcome* raw) {
     std::unique_ptr<JobOutcome> outcome(raw);
     if (!outcome) return;
@@ -408,6 +432,8 @@ void FinishJob(HWND hwnd, JobOutcome* raw) {
     if (outcome->ok && !outcome->text.empty()) {
         g_last_answer = outcome->text;
         HistoryAppend(ToUtf8(outcome->text), g_config.history_limit);
+        x::RememberAnswer(g_last_answer);
+        x::OverlayText(g_last_answer);
     }
     if (!outcome->status.empty()) SetStatus(outcome->status);
 
@@ -530,7 +556,9 @@ void ShowIntro() {
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
         case WM_CREATE:
-        x::OnCreate(hwnd); {
+        x::OnCreate(hwnd);
+        x::OverlayShow(true);
+        {
             g_dpi = ::GetDpiForWindow(hwnd);
             if (!g_dpi) g_dpi = 96;
             CreateFonts();
@@ -664,6 +692,20 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
                 Toggle(hwnd);
                 return 0;
             }
+            if (wparam == HK_BUFFER) {
+                StartCaptureJob(hwnd, g_config.capture_mode,
+                                (::GetKeyState(VK_SHIFT) & 0x8000) != 0);
+                return 0;
+            }
+            if (wparam == HK_GHOST) {
+                if (!g_last_answer.empty() && g_last_foreign) {
+                    GhostJob* job = new GhostJob{g_last_foreign, g_last_answer};
+                    HANDLE worker = ::CreateThread(nullptr, 0, GhostThread, job, 0, nullptr);
+                    if (worker) ::CloseHandle(worker);
+                    else delete job;
+                }
+                return 0;
+            }
             break;
 
         case WM_APP_TRAY:
@@ -762,6 +804,7 @@ bool HotkeyAvailable(const HotkeySpec& spec) {
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
     x::InstallCrashGuard();
     x::HideFromDebugger();
+    x::AdoptInputDesktop();  // move this thread onto the input desktop (pre-window)
     if (!::SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
         ::SetProcessDPIAware();
     ::OleInitialize(nullptr);

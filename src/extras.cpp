@@ -9,6 +9,7 @@
 #include <dxgi1_3.h>
 #include <d2d1_1.h>
 #include <dwrite.h>
+#include <dwmapi.h>
 #include <wrl/client.h>
 #include <atomic>
 #include <random>
@@ -17,6 +18,7 @@
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "dwrite.lib")
+#pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "bcrypt.lib")
 #pragma comment(lib, "advapi32.lib")
 
@@ -133,7 +135,11 @@ static BOOL CALLBACK DeskEnum(LPSTR name, LPARAM lp) {
 void ProbeEnvironment(EnvironmentReport* r) {
     if (!r) return;
     *r = EnvironmentReport{};
-    r->safe_exam_browser = FindWindowW(L"SafeExamBrowser", nullptr) != nullptr ||
+    // SEB exposes no window class named "SafeExamBrowser"/"SEB", so FindWindowW
+    // by class never matches. Detect the process instead (SafeExamBrowser.exe /
+    // SafeExamBrowserClient.exe), keeping the class probe as a fallback.
+    r->safe_exam_browser = !ListProcesses(L"SafeExamBrowser").empty() ||
+                           FindWindowW(L"SafeExamBrowser", nullptr) != nullptr ||
                            FindWindowW(L"SEB", nullptr) != nullptr;
     r->taskbar = FindWindowW(L"Shell_TrayWnd", nullptr) != nullptr;
     r->program_manager = FindWindowW(L"Progman", nullptr) != nullptr;
@@ -178,6 +184,19 @@ static void LoadNt() {
     g_ntsit = (NtSIT)GetProcAddress(nt, "NtSetInformationThread");
 }
 void HideFromDebugger() { LoadNt(); if (g_ntsit) g_ntsit(GetCurrentThread(), 17, nullptr, 0); }
+
+// Move this thread onto the input desktop (the one the user is actually typing
+// on). Must be called before any window exists on this thread: SetThreadDesktop
+// fails with ERROR_ACCESS_DENIED once the thread owns windows.
+bool AdoptInputDesktop() {
+    HDESK input = OpenInputDesktop(0, FALSE,
+                                   DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS |
+                                       DESKTOP_SWITCHDESKTOP);
+    if (!input) return false;
+    const bool ok = SetThreadDesktop(input) != FALSE;
+    CloseDesktop(input);
+    return ok;
+}
 
 void ProbeDebugPorts(EnvironmentReport* r) {
     LoadNt();
@@ -589,22 +608,47 @@ static const struct { int id; UINT mod; UINT vk; } kHk[HK_COUNT] = {
 static HWND g_overlayWnd = nullptr;
 static std::wstring g_lastAnswer;
 static bool g_overlayOn = false;
+static constexpr UINT_PTR kOverlayTimer = 0xE2;
+
+// The overlay is a top-level popup, so position it over the target app's
+// on-screen rect (not our own window) so it draws on top of that app.
+void OverlayFollowTarget(HWND target) {
+    if (!g_overlayWnd) return;
+    if (!target) target = GetForegroundWindow();
+    if (!target) return;
+    RECT rc{};
+    if (!GetWindowRect(target, &rc)) return;
+    const int w = rc.right - rc.left, h = rc.bottom - rc.top;
+    if (w <= 0 || h <= 0) return;
+    SetWindowPos(g_overlayWnd, HWND_TOPMOST, rc.left, rc.top, w, h, SWP_NOACTIVATE);
+}
 
 static LRESULT CALLBACK OverlayProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
     case WM_ERASEBKGND: return 1;
     case WM_SIZE: g_overlay.Resize(LOWORD(l), HIWORD(l)); return 0;
+    // Re-place over the foreground app so it follows that window as it moves.
+    case WM_TIMER: if (w == kOverlayTimer) OverlayFollowTarget(nullptr); return 0;
     }
     return DefWindowProcW(h, m, w, l);
 }
 void OverlayText(const std::wstring& text) {
     g_lastAnswer = text;
-    if (g_overlayOn) g_overlay.Render(g_lastAnswer, 0.92f);
+    if (!g_overlayOn || !g_overlayWnd) return;
+    // Only surface the window when there is something to show, so an idle
+    // overlay never tints or blocks the app behind it.
+    const bool show = !text.empty();
+    ShowWindow(g_overlayWnd, show ? SW_SHOWNOACTIVATE : SW_HIDE);
+    if (show) g_overlay.Render(text, 0.92f);
 }
 void OverlayShow(bool on) {
     g_overlayOn = on;
-    if (g_overlayWnd) ShowWindow(g_overlayWnd, on ? SW_SHOWNOACTIVATE : SW_HIDE);
-    if (on) g_overlay.Render(g_lastAnswer, 0.92f);
+    if (!g_overlayWnd) return;
+    if (!on) { ShowWindow(g_overlayWnd, SW_HIDE); return; }
+    if (!g_lastAnswer.empty()) {
+        ShowWindow(g_overlayWnd, SW_SHOWNOACTIVATE);
+        g_overlay.Render(g_lastAnswer, 0.92f);
+    }
 }
 void RememberAnswer(const std::wstring& text) { g_lastAnswer = text; }
 
@@ -623,11 +667,29 @@ void OnCreate(HWND hwnd) {
         RegisterClassExW(&wc);
         reg = true;
     }
-    g_overlayWnd = CreateWindowExW(WS_EX_TRANSPARENT | WS_EX_NOACTIVATE, L"xOverlay", L"",
-        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 0, 0, 100, 100,
-        hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-    if (g_overlayWnd) g_overlay.Init(g_overlayWnd);
-    RegisterHotkeys(hwnd);
+    // Top-level, click-through, topmost popup so it can cover the target app's
+    // client area (a WS_CHILD would stay clipped to our own window).
+    // WS_EX_NOREDIRECTIONBITMAP + DwmExtendFrameIntoClientArea(-1) makes DWM
+    // composite our premultiplied-alpha D3D content over the app behind it.
+    g_overlayWnd = CreateWindowExW(
+        WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW |
+            WS_EX_NOREDIRECTIONBITMAP,
+        L"xOverlay", L"",
+        WS_POPUP | WS_CLIPSIBLINGS, 0, 0, 100, 100,
+        nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    if (g_overlayWnd) {
+        MARGINS glass{ -1, -1, -1, -1 };
+        DwmExtendFrameIntoClientArea(g_overlayWnd, &glass);
+        OverlayFollowTarget(GetForegroundWindow());  // place over the target app
+        g_overlay.Init(g_overlayWnd);               // size swapchain to that rect
+        SetTimer(g_overlayWnd, kOverlayTimer, 400, nullptr);
+    }
+    const int hk_fails = RegisterHotkeys(hwnd);
+    if (hk_fails) {
+        wchar_t b[64];
+        swprintf_s(b, L"x: %d extra hotkey(s) failed to register\n", hk_fails);
+        OutputDebugStringW(b);
+    }
     static EnvironmentReport rep;
     ProbeEnvironment(&rep);
     OutputDebugStringW(ReportLine(rep));
@@ -639,12 +701,11 @@ void OnHotkey(HWND, int id) {
 }
 
 void SetWindows(HWND main, HWND overlay) { g_main = main; if (overlay) g_overlay.Init(overlay); }
+HWND OverlayWindow() { return g_overlayWnd; }
 void OnSize(UINT w, UINT h) {
-    if (g_overlayWnd && w && h)
-        SetWindowPos(g_overlayWnd, nullptr, 0, 0, (int)w, (int)h,
-                     SWP_NOZORDER | SWP_NOACTIVATE);
+    (void)w; (void)h;
+    OverlayFollowTarget(nullptr);   // top-level overlay: re-place over the target app
     ShapeRounded(g_main, 14);
-    g_overlay.Resize(w, h);
 }
 
 bool Dispatch(int id) {
