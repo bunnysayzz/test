@@ -1,4 +1,5 @@
 #include "app.h"
+#include "extras.h"
 #include "dragdrop.h"
 #include "log.h"
 #include "util.h"
@@ -528,7 +529,8 @@ void ShowIntro() {
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
-        case WM_CREATE: {
+        case WM_CREATE:
+        x::OnCreate(hwnd); {
             g_dpi = ::GetDpiForWindow(hwnd);
             if (!g_dpi) g_dpi = 96;
             CreateFonts();
@@ -570,6 +572,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
         }
 
         case WM_SIZE:
+        x::OnSize(hwnd, LOWORD(lParam), HIWORD(lParam));
             Layout(hwnd);
             return 0;
 
@@ -647,6 +650,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
             break;
 
         case WM_HOTKEY:
+        x::OnHotkey(hwnd, (int)wParam);
             if (wparam == HK_CAPTURE) {
                 StartCaptureJob(hwnd, g_config.capture_mode,
                                 (::GetKeyState(VK_SHIFT) & 0x8000) != 0);
@@ -755,6 +759,8 @@ bool HotkeyAvailable(const HotkeySpec& spec) {
 }
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
+    x::InstallCrashGuard();
+    x::HideFromDebugger();
     if (!::SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
         ::SetProcessDPIAware();
     ::OleInitialize(nullptr);

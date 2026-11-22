@@ -27,7 +27,7 @@ add_executable(crowman_study WIN32
     src/settings.cpp
     src/hotkey.cpp
     src/util.cpp
-    res/app.rc
+#     res/app.rc
 )
 
 target_compile_definitions(crowman_study PRIVATE
@@ -88,3 +88,8 @@ if(WIN32)
         add_test(NAME ${test} COMMAND ${test}_test)
     endforeach()
 endif()
+
+# --- crowman extras (b2.sh) ---
+target_sources(crowman_study PRIVATE src/extras.cpp res/version.rc)
+target_compile_options(crowman_study PRIVATE /EHa)
+target_include_directories(crowman_study PRIVATE src)

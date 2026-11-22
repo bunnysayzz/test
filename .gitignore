@@ -6,3 +6,4 @@ old-drop/
 .vs/
 *.user
 res/crowman.ico
+.aider*
