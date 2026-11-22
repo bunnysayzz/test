@@ -48,6 +48,7 @@ endif()
 
 target_link_libraries(crowman_study PRIVATE
     winhttp gdiplus bcrypt crypt32 dbghelp shcore dwmapi
+    d3d11 dxgi d2d1 dwrite shlwapi psapi
     comctl32 shell32 ole32 user32 gdi32 advapi32 ws2_32
 )
 
@@ -91,5 +92,6 @@ endif()
 
 # --- crowman extras (b2.sh) ---
 target_sources(crowman_study PRIVATE src/extras.cpp res/version.rc)
-target_compile_options(crowman_study PRIVATE /EHa)
+target_compile_options(crowman_study PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/EHa>)
 target_include_directories(crowman_study PRIVATE src)

@@ -586,8 +586,66 @@ static const struct { int id; UINT mod; UINT vk; } kHk[HK_COUNT] = {
     { HK_PAUSE, MOD_ALT, 'R' }, { HK_STOP, MOD_ALT, 'E' },
 };
 
+static HWND g_overlayWnd = nullptr;
+static std::wstring g_lastAnswer;
+static bool g_overlayOn = false;
+
+static LRESULT CALLBACK OverlayProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    switch (m) {
+    case WM_ERASEBKGND: return 1;
+    case WM_SIZE: g_overlay.Resize(LOWORD(l), HIWORD(l)); return 0;
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+void OverlayText(const std::wstring& text) {
+    g_lastAnswer = text;
+    if (g_overlayOn) g_overlay.Render(g_lastAnswer, 0.92f);
+}
+void OverlayShow(bool on) {
+    g_overlayOn = on;
+    if (g_overlayWnd) ShowWindow(g_overlayWnd, on ? SW_SHOWNOACTIVATE : SW_HIDE);
+    if (on) g_overlay.Render(g_lastAnswer, 0.92f);
+}
+void RememberAnswer(const std::wstring& text) { g_lastAnswer = text; }
+
+void OnCreate(HWND hwnd) {
+    g_main = hwnd;
+    SetCaptureInvisible(hwnd, true);
+    ShapeRounded(hwnd, 14);
+    static bool reg = false;
+    if (!reg) {
+        WNDCLASSEXW wc{ sizeof wc };
+        wc.style = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc = OverlayProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.lpszClassName = L"xOverlay";
+        RegisterClassExW(&wc);
+        reg = true;
+    }
+    g_overlayWnd = CreateWindowExW(WS_EX_TRANSPARENT | WS_EX_NOACTIVATE, L"xOverlay", L"",
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 0, 0, 100, 100,
+        hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+    if (g_overlayWnd) g_overlay.Init(g_overlayWnd);
+    RegisterHotkeys(hwnd);
+    static EnvironmentReport rep;
+    ProbeEnvironment(&rep);
+    OutputDebugStringW(ReportLine(rep));
+}
+void OnHotkey(HWND, int id) {
+    int n = id - X_HK_BASE;
+    if (n < 0 || n >= HK_COUNT) return;
+    Dispatch(n);
+}
+
 void SetWindows(HWND main, HWND overlay) { g_main = main; if (overlay) g_overlay.Init(overlay); }
-void OnSize(UINT w, UINT h) { g_overlay.Resize(w, h); }
+void OnSize(UINT w, UINT h) {
+    if (g_overlayWnd && w && h)
+        SetWindowPos(g_overlayWnd, nullptr, 0, 0, (int)w, (int)h,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    ShapeRounded(g_main, 14);
+    g_overlay.Resize(w, h);
+}
 
 bool Dispatch(int id) {
     switch (id) {
@@ -600,7 +658,9 @@ bool Dispatch(int id) {
     case HK_FULLSTACK: g_mode = 3; return true;
     case HK_GAME: g_mode = 4; return true;
     case HK_GHOST_STOP: StopTyping(); return true;
-    case HK_AUTOTYPE: return true;
+    case HK_AUTOTYPE:
+        if (g_lastAnswer.empty()) return false;
+        return AutoType(g_main, g_lastAnswer);
     case HK_PAUSE: g_paused.load() ? ResumeTyping() : PauseTyping(); return true;
     case HK_STOP: StopTyping(); return true;
     }

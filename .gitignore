@@ -7,3 +7,4 @@ old-drop/
 *.user
 res/crowman.ico
 .aider*
+*.bak.*

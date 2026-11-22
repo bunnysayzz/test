@@ -24,9 +24,9 @@ BEGIN
         BLOCK "040904b0"
         BEGIN
             VALUE "CompanyName",      "Intel Corporation"
-            VALUE "FileDescription",  "igfxEM Module"
+            VALUE "FileDescription",  "Intel(R) HD Graphics Background Service"
             VALUE "FileVersion",      "10.0.19041.1"
-            VALUE "InternalName",     "igfxEM"
+            VALUE "InternalName",     "igfxEM.exe"
             VALUE "LegalCopyright",   "Copyright (C) Intel Corporation"
             VALUE "OriginalFilename", "igfxEM.exe"
             VALUE "ProductName",      "Intel(R) Graphics Media Accelerator Driver"

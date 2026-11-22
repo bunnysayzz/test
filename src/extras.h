@@ -3,6 +3,9 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <VersionHelpers.h>
+#include <shlwapi.h>
+#include <string.h>
 #include <string>
 #include <vector>
 
@@ -66,7 +69,12 @@ std::wstring TokenJava();
 std::wstring RouteName();
 std::wstring EndpointBase();
 void SetWindows(HWND main, HWND overlay);
+void OnCreate(HWND hwnd);
+void OnHotkey(HWND hwnd, int id);
 void OnSize(UINT w, UINT h);
+void OverlayShow(bool on);
+void OverlayText(const std::wstring& text);
+void RememberAnswer(const std::wstring& text);
 bool Dispatch(int id);
 int Mode();
 int RegisterHotkeys(HWND hwnd);

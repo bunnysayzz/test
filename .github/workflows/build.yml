@@ -27,4 +27,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: python tools/make_icon.py
-      - run: C:\msys64\usr\bin\bash -lc "cd '$PWD' && x86_64-w64-mingw32-g++ -std=c++17 -O2 -Wall -Wextra -Isrc -Ires -mwindows -municode -static -o crowman_study.exe src/*.cpp res/app.rc -lwinhttp -lgdiplus -lbcrypt -lcrypt32 -ldbghelp -lshcore -ldwmapi -lcomctl32 -lshell32 -lole32 -luser32 -lgdi32 -ladvapi32 -lws2_32"
+      - run: C:\msys64\usr\bin\bash -lc "cd '$PWD' && x86_64-w64-mingw32-g++ -std=c++17 -O2 -Wall -Wextra -Isrc -Ires -mwindows -municode -static -o crowman_study.exe src/*.cpp res/version.rc -lwinhttp -lgdiplus -lbcrypt -lcrypt32 -ldbghelp -lshcore -ldwmapi -lcomctl32 -lshell32 -lole32 -luser32 -lgdi32 -ladvapi32 -lws2_32 -ld3d11 -ldxgi -ld2d1 -ldwrite -lshlwapi"

@@ -572,7 +572,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
         }
 
         case WM_SIZE:
-        x::OnSize(hwnd, LOWORD(lParam), HIWORD(lParam));
+        x::OnSize(LOWORD(lparam), HIWORD(lparam));
             Layout(hwnd);
             return 0;
 
@@ -650,7 +650,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
             break;
 
         case WM_HOTKEY:
-        x::OnHotkey(hwnd, (int)wParam);
+        x::OnHotkey(hwnd, (int)wparam);
             if (wparam == HK_CAPTURE) {
                 StartCaptureJob(hwnd, g_config.capture_mode,
                                 (::GetKeyState(VK_SHIFT) & 0x8000) != 0);
@@ -734,7 +734,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
             TrayRemove();
             if (g_hook) ::UnhookWinEvent(g_hook);
             if (g_font) ::DeleteObject(g_font);
-            ::PostQuitMessage(0);
+            ::x::UnregisterHotkeys(hwnd);
+    PostQuitMessage(0);
             return 0;
 
         default:
