@@ -41,6 +41,8 @@
 #define WM_APP_RELOAD (WM_APP + 4)
 #define WM_JOB_DONE (WM_APP + 5)
 #define WM_APP_CROP (WM_APP + 6)
+#define WM_APP_GHOST_PROGRESS (WM_APP + 7)
+#define WM_APP_AUTOTYPE (WM_APP + 8)
 
 enum class CaptureMode { Desktop = 0, ActiveMonitor = 1, ForegroundWindow = 2, PickWindow = 3, Region = 4 };
 

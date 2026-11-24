@@ -4,6 +4,8 @@
 // WM_CREATE -> x::SetWindows(hwnd, 0); x::RegisterHotkeys(hwnd);
 // Compile /EHa.
 #include "extras.h"
+#include "app.h"  // WM_APP_AUTOTYPE / WM_APP_GHOST_PROGRESS status messages
+#include "prompts.h"  // kPromptMcq / Dsa / Universal / Game (verbatim exe text)
 #include <tlhelp32.h>
 #include <d3d11.h>
 #include <dxgi1_3.h>
@@ -26,6 +28,21 @@ namespace x {
 
 static constexpr DWORD WDA_EXCLUDE = 0x00000011;
 inline bool SupportsExclude() { return IsWindowsVersionOrGreater(10, 0, 19041) != FALSE; }
+
+static HWND g_main = nullptr;  // main window - owns the status line we post to
+static HWND g_typing_target = nullptr;  // exam window Alt+F types into
+static bool g_ghost_kind = false;       // current typing job: ghost vs auto
+
+// Status-line text from a worker thread (Dispatch and the typing threads run
+// off the UI thread; SetStatus must not be called from them).
+static void PostStatus(const std::wstring& text) {
+    if (!g_main) return;
+    ::PostMessageW(g_main, WM_APP_XSTATUS, 0, (LPARAM)new std::wstring(text));
+}
+
+void SetTypingTarget(HWND target) { g_typing_target = target; }
+void SetGhostTyping(bool on) { g_ghost_kind = on; }
+bool GhostTyping() { return g_ghost_kind; }
 
 bool SetCaptureInvisible(HWND h, bool on) {
     if (!h) return false;
@@ -63,10 +80,23 @@ void StealthShow(HWND h) {
 }
 [[noreturn]] void EmergencyExit() { TerminateProcess(GetCurrentProcess(), 0); ExitProcess(0); }
 
+// Verbatim from the reference build (.rdata 0009ed10-0009eecf): header,
+// 13 aligned rows, bracketed footer.
 static const wchar_t* const kGuide[] = {
-    L"Alt+N  Stealth Dim 9%  (Alt+N to restore)", L"Alt+D  Hide UI", L"Alt+I  Keys guide",
-    L"Alt+Shift+X  Emergency exit", L"Alt+M / 8 / 9 / 0  Solver modes",
-    L"Alt+G  GhostType stop", L"Alt+F  Auto type",
+    L"[SHORTCUT GUIDE - Alt+I: 10s]",
+    L" Alt+M       : Multi-MCQ Solver",
+    L" Alt+8       : Coding Solver (DSA)",
+    L" Alt+9       : FullStack / SQL / Web / Debug",
+    L" Alt+0       : Game & Puzzle Solver",
+    L" Alt+B       : Add SS to Buffer",
+    L" Alt+F       : Auto Type Solution",
+    L" Alt+G       : Ghost Type (Stealth)",
+    L" Alt+R       : Pause / Resume Type",
+    L" Alt+E       : Stop Typing",
+    L" Alt+D       : Show / Hide UI",
+    L" Alt+N       : Dim 9% (Stealth)",
+    L" Alt+I       : Show 10s Guide",
+    L" Alt+Shift+X : Emergency Exit",
 };
 static constexpr UINT_PTR kGuideTimer = 0xE1;
 static HWND g_guide = nullptr;
@@ -86,7 +116,7 @@ static LRESULT CALLBACK GuideProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         int y = 12;
         for (auto* s : kGuide) { TextOutW(dc, 12, y, s, (int)wcslen(s)); y += 20; }
         SetTextColor(dc, RGB(140, 140, 140));
-        const wchar_t* foot = L"Keys Guide: Auto-hides in 10s";
+        const wchar_t* foot = L"[Keys Guide: Auto-hides in 10s]";
         TextOutW(dc, 12, y + 6, foot, (int)wcslen(foot));
         SelectObject(dc, o); DeleteObject(f);
         EndPaint(h, &ps);
@@ -114,7 +144,7 @@ void ShowKeysGuide(HWND owner) {
     int hh = 26 + (int)(sizeof(kGuide) / sizeof(kGuide[0])) * 20 + 30;
     g_guide = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
         L"xKeysGuide", L"", WS_POPUP | WS_BORDER,
-        work.right - 420, work.bottom - hh - 20, 400, hh,
+        work.right - 480, work.bottom - hh - 20, 460, hh,
         owner, nullptr, GetModuleHandleW(nullptr), nullptr);
     if (!g_guide) return;
     ShowWindow(g_guide, SW_SHOWNOACTIVATE);
@@ -355,13 +385,22 @@ static bool SetClipboardText(HWND owner, const std::wstring& text) {
     return true;
 }
 bool AutoType(HWND owner, const std::wstring& text) {
+    if (text.empty()) return false;
+    // Exe parity: report line progress on the status line. The paste itself is
+    // one atomic Ctrl+V, so the line counter goes 0% -> 100% around it.
+    size_t lines = 1;
+    for (wchar_t ch : text)
+        if (ch == L'\n') ++lines;
+    if (g_main) ::PostMessageW(g_main, WM_APP_AUTOTYPE, 0, (LPARAM)lines);
     if (!SetClipboardText(owner, text)) return false;
     INPUT in[4]{};
     in[0].type = INPUT_KEYBOARD; in[0].ki.wVk = VK_CONTROL;
     in[1].type = INPUT_KEYBOARD; in[1].ki.wVk = 'V';
     in[2].type = INPUT_KEYBOARD; in[2].ki.wVk = 'V'; in[2].ki.dwFlags = KEYEVENTF_KEYUP;
     in[3].type = INPUT_KEYBOARD; in[3].ki.wVk = VK_CONTROL; in[3].ki.dwFlags = KEYEVENTF_KEYUP;
-    return Inject(in, 4);
+    const bool ok = Inject(in, 4);
+    if (g_main) ::PostMessageW(g_main, WM_APP_AUTOTYPE, (WPARAM)lines, (LPARAM)lines);
+    return ok;
 }
 
 std::vector<ProcessEntry> ListProcesses(const wchar_t* filter) {
@@ -425,9 +464,6 @@ bool KillProcess(DWORD pid, UINT code) {
     return k != FALSE;
 }
 
-static const wchar_t* kContract =
-    L"\n\nEnd with exactly one line:\nFINAL_ANSWER: [A]\nNothing after it.";
-
 bool ParseAnswerLetter(const std::wstring& text, wchar_t* out) {
     if (!out) return false;
     static const wchar_t* const kLabels[] = {
@@ -449,20 +485,25 @@ bool ParseAnswerLetter(const std::wstring& text, wchar_t* out) {
     return false;
 }
 
+// Full exe prompt for the active solver mode (Alt+M / 8 / 9 / 0). The old
+// four-line mode label is gone: every rule block the reference build sends -
+// multi-question MCQ contract, DSA autodetect/no-TLE, universal SQL/debug/
+// fullstack/aptitude/essay/approach, and the game solver - is carried verbatim
+// in prompts.h. `question` is appended only when non-empty.
 std::wstring BuildPersonaPrompt(int mode, const std::wstring& question) {
-    std::wstring out =
-        L"You are an elite exam evaluator solving an AI Literacy, Technical, and Aptitude MCQ assessment.\n\n";
+    const wchar_t* block;
     switch (mode) {
-    case 1: out += L"Alt+M : Multi-MCQ Solver. Work each option, eliminate, then commit one letter."; break;
-    case 2: out += L"Alt+8 : Coding Solver (DSA). State complexity, give corrected code, then commit."; break;
-    case 3: out += L"Alt+9 : FullStack / SQL / Web / Debug. Name the fault, then commit."; break;
-    case 4: out += L"Alt+0 : Game & Puzzle Solver. Find the winning line, then commit."; break;
+    case 2:  block = kPromptDsa; break;
+    case 3:  block = kPromptUniversal; break;
+    case 4:  block = kPromptGame; break;
+    default: block = kPromptMcq; break;  // mode 1 (and any unknown mode)
     }
-    out += L"\n\nStrict Anti-Plagiarism & AI-Evasion (0% AI detection, authentic human student voice). "
-           L"Vary sentence length. Use contractions. No em dashes. ABSOLUTELY ZERO CONVERSATIONAL FILLER.";
-    out += kContract;
-    out += L"\n\n";
-    out += question;
+    std::wstring out = block;
+    if (!out.empty() && (out[0] == L'\n' || out[0] == L'\r')) out.erase(0, 1);
+    if (!question.empty()) {
+        out += L"\n\n";
+        out += question;
+    }
     return out;
 }
 
@@ -591,17 +632,19 @@ private:
 };
 
 static Overlay g_overlay;
-static HWND g_main = nullptr;
 static bool g_dimmed = false, g_hidden = false;
 static int g_mode = 0;
 
+// Exe hotkey map (13 rows, strings_annotated.txt 0009ed10-0009eecf).
+// Alt+G (Ghost Type start/stop toggle) lives in main.cpp with the ghost job;
+// Alt+F/R/E here drive the typing engines.
 enum : int { HK_DIM = 0, HK_HIDE, HK_GUIDE, HK_KILL, HK_MULTI, HK_CODE,
-             HK_FULLSTACK, HK_GAME, HK_GHOST_STOP, HK_AUTOTYPE, HK_PAUSE, HK_STOP, HK_COUNT };
+             HK_FULLSTACK, HK_GAME, HK_AUTOTYPE, HK_PAUSE, HK_STOP, HK_COUNT };
 static const struct { int id; UINT mod; UINT vk; } kHk[HK_COUNT] = {
     { HK_DIM, MOD_ALT, 'N' }, { HK_HIDE, MOD_ALT, 'D' }, { HK_GUIDE, MOD_ALT, 'I' },
     { HK_KILL, MOD_ALT | MOD_SHIFT, 'X' }, { HK_MULTI, MOD_ALT, 'M' },
     { HK_CODE, MOD_ALT, '8' }, { HK_FULLSTACK, MOD_ALT, '9' }, { HK_GAME, MOD_ALT, '0' },
-    { HK_GHOST_STOP, MOD_ALT, 'G' }, { HK_AUTOTYPE, MOD_ALT, 'F' },
+    { HK_AUTOTYPE, MOD_ALT, 'F' },
     { HK_PAUSE, MOD_ALT, 'R' }, { HK_STOP, MOD_ALT, 'E' },
 };
 

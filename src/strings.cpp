@@ -1,5 +1,7 @@
 #include "strings.h"
 
+#include <cwchar>
+
 namespace {
 
 struct Entry {
@@ -24,7 +26,7 @@ const Entry kTable[] = {
     {Str::BtnLoadIntoAnswer, L"Load into answer box", L"In Antwortfeld laden", L"Cargar en el cuadro"},
     {Str::BtnClearHistory, L"Clear history", L"Verlauf leeren", L"Borrar historial"},
     {Str::BtnOpenIni, L"Open config.ini", L"config.ini offnen", L"Abrir config.ini"},
-    {Str::StatusReady, L"Ready.", L"Bereit.", L"Listo."},
+    {Str::StatusReady, L"Ready [Alt+D:Hide | Alt+N:Dim | Alt+I:Keys]", L"Bereit [Alt+D:Verstecken | Alt+N:Abdunkeln | Alt+I:Tasten]", L"Listo [Alt+D:Ocultar | Alt+N:Atenuar | Alt+I:Teclas]"},
     {Str::StatusCreatedConfig, L"Created config.ini - click Settings.", L"config.ini erstellt - Einstellungen offnen.", L"config.ini creado: abre Ajustes."},
     {Str::StatusCapturing, L"Capturing...", L"Aufnahme...", L"Capturando..."},
     {Str::StatusStreaming, L"Streaming answer...", L"Antwort wird gestreamt...", L"Transmitiendo..."},
@@ -92,6 +94,13 @@ const Entry kTable[] = {
     {Str::HotkeyCapture, L"Capture:", L"Aufnehmen:", L"Capturar:"},
     {Str::HotkeyCopy, L"Copy answer:", L"Antwort kopieren:", L"Copiar:"},
     {Str::HotkeyToggle, L"Show / hide:", L"Zeigen / verstecken:", L"Mostrar / ocultar:"},
+    {Str::TitleActivation, L"Enter Activation Key", L"Aktivierungsschluessel eingeben", L"Introducir clave de activacion"},
+    {Str::LblActivation, L"Please enter your Activation Key", L"Bitte geben Sie Ihren Aktivierungsschluessel ein", L"Introduzca su clave de activacion"},
+    {Str::LblUniqueId, L"Unique ID: ", L"Eindeutige ID: ", L"ID unica: "},
+    {Str::BtnActivate, L"Activate", L"Aktivieren", L"Activar"},
+    {Str::StatusKeySaved, L"Activation key saved.", L"Aktivierungsschluessel gespeichert.", L"Clave de activacion guardada."},
+    {Str::GhostProgress, L"Ghost: [L{}/{}] ({P1}%)", L"Ghost: [L{}/{}] ({P1}%)", L"Ghost: [L{}/{}] ({P1}%)"},
+    {Str::AutoProgress, L"AutoTyping: [{}/{} lines] ({P0}%)", L"AutoTyping: [{}/{} Zeilen] ({P0}%)", L"AutoTyping: [{}/{} lineas] ({P0}%)"},
 };
 
 constexpr size_t kCount = (size_t)Str::Count;
@@ -120,5 +129,27 @@ std::wstring SFormat(Str id, size_t value) {
     const std::wstring token = L"{}";
     const size_t at = text.find(token);
     if (at != std::wstring::npos) text.replace(at, token.size(), std::to_wstring(value));
+    return text;
+}
+
+std::wstring SProgress(Str id, size_t done, size_t total) {
+    std::wstring text = S(id);
+    const wchar_t* token = L"{}";
+    const size_t first = text.find(token);
+    if (first != std::wstring::npos)
+        text.replace(first, 2, std::to_wstring(done));
+    const size_t second = text.find(token);
+    if (second != std::wstring::npos)
+        text.replace(second, 2, std::to_wstring(total));
+
+    // {P1} -> 12.5, {P0} -> 13 (the two exe format styles, %.1f / %.0f).
+    const bool one_decimal = text.find(L"{P1}") != std::wstring::npos;
+    wchar_t percent[32] = {};
+    const double value = total ? 100.0 * (double)done / (double)total : 0.0;
+    if (one_decimal) swprintf_s(percent, L"%.1f", value);
+    else swprintf_s(percent, L"%.0f", value);
+    const size_t at = text.find(one_decimal ? L"{P1}" : L"{P0}");
+    if (at != std::wstring::npos)
+        text.replace(at, 4, percent);
     return text;
 }

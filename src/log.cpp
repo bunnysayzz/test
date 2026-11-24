@@ -86,6 +86,13 @@ LONG WINAPI CrashFilter(EXCEPTION_POINTERS* info) {
         ::CloseHandle(file);
     }
 
+    // Exe parity: tell the user the crash was captured (log + summary + dump).
+    wchar_t notice[160] = {};
+    swprintf_s(notice, L"Unhandled Exception 0x%08X at %p safely logged.",
+               (unsigned)code, address);
+    ::MessageBoxW(nullptr, notice, CROWMAN_APP_NAME,
+                  MB_OK | MB_ICONERROR | MB_SYSTEMMODAL | MB_SETFOREGROUND);
+
     LogClose();
     return EXCEPTION_EXECUTE_HANDLER;
 }

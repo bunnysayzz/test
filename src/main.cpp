@@ -409,8 +409,19 @@ void StartAskJob(HWND hwnd) {
 
 struct GhostJob {
     HWND target;
+    HWND owner;  // main window - progress lands on its status line
     std::wstring text;
 };
+
+// GhostType progress -> status line, throttled to whole-percent changes so a
+// long answer does not flood the message queue (runs on the worker thread).
+void GhostProgress(size_t done, size_t total, void* user) {
+    static thread_local int last_percent = -1;
+    const int percent = total ? (int)(100 * done / total) : 0;
+    if (percent == last_percent) return;
+    last_percent = percent;
+    ::PostMessageW((HWND)user, WM_APP_GHOST_PROGRESS, (WPARAM)done, (LPARAM)total);
+}
 
 // GhostType types keystroke-by-keystroke with Sleep, so it must run off the
 // UI thread. The target is the last foreground (exam) window captured by the
@@ -418,7 +429,7 @@ struct GhostJob {
 DWORD WINAPI GhostThread(LPVOID parameter) {
     std::unique_ptr<GhostJob> job((GhostJob*)parameter);
     x::TypeOptions opt;  // defaults: humanized delay + jitter, restore focus
-    x::GhostType(job->target, job->text, opt);
+    x::GhostType(job->target, job->text, opt, GhostProgress, job->owner);
     return 0;
 }
 
@@ -699,7 +710,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
             }
             if (wparam == HK_GHOST) {
                 if (!g_last_answer.empty() && g_last_foreign) {
-                    GhostJob* job = new GhostJob{g_last_foreign, g_last_answer};
+                    GhostJob* job = new GhostJob{g_last_foreign, hwnd, g_last_answer};
                     HANDLE worker = ::CreateThread(nullptr, 0, GhostThread, job, 0, nullptr);
                     if (worker) ::CloseHandle(worker);
                     else delete job;
@@ -717,6 +728,14 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
 
         case WM_APP_RELOAD:
             ReloadConfig(hwnd);
+            return 0;
+
+        case WM_APP_GHOST_PROGRESS:
+            SetStatus(SProgress(Str::GhostProgress, (size_t)wparam, (size_t)lparam));
+            return 0;
+
+        case WM_APP_AUTOTYPE:
+            SetStatus(SProgress(Str::AutoProgress, (size_t)wparam, (size_t)lparam));
             return 0;
 
         case WM_JOB_CAPTURED: {
@@ -801,7 +820,174 @@ bool HotkeyAvailable(const HotkeySpec& spec) {
     return free;
 }
 
+// --- Activation dialog (exe parity: "Enter Activation Key" / "Unique ID:") ---
+namespace {
+
+constexpr wchar_t kActivationClass[] = L"CrowmanActivationWindow";
+
+enum : int { ID_ACT_EDIT = 4301, ID_ACT_COPY = 4302 };
+
+struct ActivationState {
+    std::wstring key;
+    bool accepted = false;
+};
+
+void CopyWideToClipboard(HWND owner, const std::wstring& text) {
+    if (!::OpenClipboard(owner)) return;
+    ::EmptyClipboard();
+    const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+    if (HGLOBAL memory = ::GlobalAlloc(GMEM_MOVEABLE, bytes)) {
+        if (void* target = ::GlobalLock(memory)) {
+            std::memcpy(target, text.c_str(), bytes);
+            ::GlobalUnlock(memory);
+            if (!::SetClipboardData(CF_UNICODETEXT, memory)) ::GlobalFree(memory);
+        } else {
+            ::GlobalFree(memory);
+        }
+    }
+    ::CloseClipboard();
+}
+
+std::wstring TrimKey(const std::wstring& text) {
+    const wchar_t* blanks = L" \t\r\n";
+    const size_t begin = text.find_first_not_of(blanks);
+    if (begin == std::wstring::npos) return {};
+    const size_t last = text.find_last_not_of(blanks);
+    return text.substr(begin, last - begin + 1);
+}
+
+LRESULT CALLBACK ActivationProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    auto* state = (ActivationState*)::GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    switch (message) {
+        case WM_CREATE: {
+            auto* created = (CREATESTRUCTW*)lparam;
+            state = (ActivationState*)created->lpCreateParams;
+            ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)state);
+            HINSTANCE instance = (HINSTANCE)::GetWindowLongPtrW(hwnd, GWLP_HINSTANCE);
+            const int pad = 16, wide = 452;
+            ::CreateWindowExW(0, L"STATIC", S(Str::LblActivation),
+                              WS_CHILD | WS_VISIBLE, pad, pad, wide, 36, hwnd,
+                              nullptr, instance, nullptr);
+            const std::wstring uid =
+                std::wstring(S(Str::LblUniqueId)) + FromUtf8(g_hwid);
+            ::CreateWindowExW(0, L"STATIC", uid.c_str(),
+                              WS_CHILD | WS_VISIBLE, pad, pad + 44, wide - 96, 20,
+                              hwnd, nullptr, instance, nullptr);
+            ::CreateWindowExW(0, L"BUTTON", S(Str::BtnCopy),
+                              WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                              pad + wide - 92, pad + 40, 92, 24, hwnd,
+                              (HMENU)(INT_PTR)ID_ACT_COPY, instance, nullptr);
+            ::CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                              pad, pad + 76, wide, 26, hwnd,
+                              (HMENU)(INT_PTR)ID_ACT_EDIT, instance, nullptr);
+            ::CreateWindowExW(0, L"BUTTON", S(Str::BtnActivate),
+                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                              pad + wide - 200, pad + 114, 104, 28, hwnd,
+                              (HMENU)IDOK, instance, nullptr);
+            ::CreateWindowExW(0, L"BUTTON", S(Str::BtnCancel),
+                              WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                              pad + wide - 92, pad + 114, 92, 28, hwnd,
+                              (HMENU)IDCANCEL, instance, nullptr);
+            HFONT font = (HFONT)::GetStockObject(DEFAULT_GUI_FONT);
+            for (HWND child = ::GetWindow(hwnd, GW_CHILD); child;
+                 child = ::GetWindow(child, GW_HWNDNEXT))
+                ::SendMessageW(child, WM_SETFONT, (WPARAM)font, TRUE);
+            return 0;
+        }
+
+        case WM_COMMAND: {
+            const int id = LOWORD(wparam);
+            if (id == IDOK) {
+                if (!state) return 0;
+                wchar_t buffer[1024] = {};
+                ::GetWindowTextW(::GetDlgItem(hwnd, ID_ACT_EDIT), buffer, 1024);
+                const std::wstring key = TrimKey(buffer);
+                if (key.empty()) {
+                    ::MessageBeep(MB_ICONWARNING);
+                    return 0;
+                }
+                Secrets secrets = CurrentSecrets();
+                secrets.license_key = key;
+                if (SaveSecrets(secrets)) SecretsSetCurrent(secrets);
+                state->key = key;
+                state->accepted = true;
+                ::DestroyWindow(hwnd);
+                return 0;
+            }
+            if (id == ID_ACT_COPY) {
+                CopyWideToClipboard(hwnd, FromUtf8(g_hwid));
+                return 0;
+            }
+            if (id == IDCANCEL) {
+                ::DestroyWindow(hwnd);
+                return 0;
+            }
+            return 0;
+        }
+
+        case WM_CLOSE:
+            ::DestroyWindow(hwnd);
+            return 0;
+    }
+    return ::DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+}  // namespace
+
+void ShowActivationDialog(HWND owner) {
+    static bool registered = false;
+    if (!registered) {
+        registered = true;
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.style = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc = ActivationProc;
+        wc.hInstance = ::GetModuleHandleW(nullptr);
+        wc.hCursor = ::LoadCursorW(nullptr, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpszClassName = kActivationClass;
+        ::RegisterClassExW(&wc);
+    }
+
+    ActivationState state;
+    RECT bounds{};
+    ::GetWindowRect(owner, &bounds);
+    HWND window = ::CreateWindowExW(
+        WS_EX_DLGMODALFRAME, kActivationClass, S(Str::TitleActivation),
+        WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE, bounds.left + 60,
+        bounds.top + 60, 500, 230, owner, nullptr, ::GetModuleHandleW(nullptr),
+        &state);
+    if (!window) return;
+
+    ::EnableWindow(owner, FALSE);
+    MSG message{};
+    while (::IsWindow(window)) {
+        if (::GetMessageW(&message, nullptr, 0, 0) <= 0) break;
+        if (!::IsDialogMessageW(window, &message)) {
+            ::TranslateMessage(&message);
+            ::DispatchMessageW(&message);
+        }
+    }
+    ::EnableWindow(owner, TRUE);
+    ::SetForegroundWindow(owner);
+    if (state.accepted) SetStatus(S(Str::StatusKeySaved));
+}
+
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
+    // Single-instance guard: a second launch activates the first and exits.
+    // `single` is intentionally kept open for the process lifetime - closing it
+    // would destroy the mutex and let another instance start.
+    HANDLE single = ::CreateMutexW(nullptr, TRUE, L"CrowmanStudy_SingleInstance");
+    if (::GetLastError() == ERROR_ALREADY_EXISTS) {
+        if (HWND existing = ::FindWindowW(kClass, CROWMAN_APP_NAME)) {
+            ::ShowWindow(existing, SW_SHOW);
+            ::SetForegroundWindow(existing);
+        }
+        if (single) ::CloseHandle(single);
+        return 0;
+    }
+
     x::InstallCrashGuard();
     x::HideFromDebugger();
     x::AdoptInputDesktop();  // move this thread onto the input desktop (pre-window)
@@ -832,6 +1018,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show_command) {
 
     ::ShowWindow(window, show_command == 0 ? SW_SHOWNORMAL : show_command);
     ::UpdateWindow(window);
+
+    // Exe parity: ask for the activation key when one is required but missing.
+    if ((g_config.mode == L"broker" || !g_config.license_url.empty()) &&
+        CurrentSecrets().license_key.empty())
+        ShowActivationDialog(window);
 
     MSG message{};
     while (::GetMessageW(&message, nullptr, 0, 0) > 0) {

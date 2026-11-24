@@ -85,9 +85,19 @@ enum class Str {
     HotkeyCapture,
     HotkeyCopy,
     HotkeyToggle,
+    TitleActivation,
+    LblActivation,
+    LblUniqueId,
+    BtnActivate,
+    StatusKeySaved,
+    GhostProgress,
+    AutoProgress,
     Count
 };
 
 void SetLanguage(const std::wstring& code);
 const wchar_t* S(Str id);
 std::wstring SFormat(Str id, size_t value);
+// Progress line for the typing features. The entry text uses {} for the two
+// counters plus {P1} (one decimal) or {P0} (whole percent) for the percentage.
+std::wstring SProgress(Str id, size_t done, size_t total);
