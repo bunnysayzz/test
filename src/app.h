@@ -43,6 +43,10 @@
 #define WM_APP_CROP (WM_APP + 6)
 #define WM_APP_GHOST_PROGRESS (WM_APP + 7)
 #define WM_APP_AUTOTYPE (WM_APP + 8)
+// Status-line text posted by the parity extras (Dispatch / typing threads run
+// off the UI thread, so SetStatus must not be called from them). The payload is
+// an owned std::wstring*.
+#define WM_APP_XSTATUS (WM_APP + 9)
 
 enum class CaptureMode { Desktop = 0, ActiveMonitor = 1, ForegroundWindow = 2, PickWindow = 3, Region = 4 };
 

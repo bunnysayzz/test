@@ -36,8 +36,8 @@ enum : int {
 };
 
 constexpr int HK_CAPTURE = 1, HK_COPY = 2, HK_TOGGLE = 3,
-    HK_BUFFER = 4,    // Alt+B: add current capture to buffer (parity hotkey)
-    HK_GHOST = 5;     // Alt+T: ghost-type last answer into the foreground app
+    HK_BUFFER = 4;    // Alt+B: add current capture to buffer (parity hotkey)
+                      // Alt+G (ghost type start/stop) is x::HK_GHOST_STOP.
 constexpr UINT_PTR kElapsed = 1, kBatch = 2;
 
 HWND g_answer, g_status, g_capture, g_copy, g_settings, g_cancel, g_history, g_send,
@@ -56,6 +56,7 @@ NOTIFYICONDATAW g_tray{};
 bool g_tray_visible = false;
 int g_elapsed = 0;
 bool g_streaming = false;
+bool g_buffer_status = false;  // next batch line reads "Added to Buffer (N ss)"
 
 int Scale(int value) { return ::MulDiv(value, (int)g_dpi, 96); }
 
@@ -81,7 +82,11 @@ void UpdateBatchUi() {
     const size_t count = g_batch.size();
     ::ShowWindow(g_send, count ? SW_SHOW : SW_HIDE);
     ::EnableWindow(g_capture, count >= CROWMAN_BATCH_MAX ? FALSE : TRUE);
-    if (count) SetStatus(SFormat(Str::StatusBatch, count));
+    if (count) {
+        SetStatus(g_buffer_status ? SFormat(Str::StatusBatchAdded, count)
+                                  : SFormat(Str::StatusBatch, count));
+        g_buffer_status = false;
+    }
 }
 
 void ClearBatch() {
@@ -219,7 +224,6 @@ void UnregisterHotkeys(HWND hwnd) {
     ::UnregisterHotKey(hwnd, HK_COPY);
     ::UnregisterHotKey(hwnd, HK_TOGGLE);
     ::UnregisterHotKey(hwnd, HK_BUFFER);
-    ::UnregisterHotKey(hwnd, HK_GHOST);
 }
 
 void RegisterHotkeys(HWND hwnd) {
@@ -233,7 +237,6 @@ void RegisterHotkeys(HWND hwnd) {
     one(HK_COPY, g_config.hotkey_copy);
     one(HK_TOGGLE, g_config.hotkey_toggle);
     one(HK_BUFFER, HotkeySpec{MOD_ALT, 'B', true});
-    one(HK_GHOST, HotkeySpec{MOD_ALT, 'T', true});
 }
 
 struct CaptureJob {
@@ -255,7 +258,8 @@ void CALLBACK ForegroundEvent(HWINEVENTHOOK, DWORD, HWND window, LONG, LONG, DWO
                               DWORD) {
     if (window) {
         g_last_foreign = window;
-        x::OverlayFollowTarget(window);  // keep the overlay on the foreground app
+        x::SetTypingTarget(window);          // Alt+G types into this window
+        x::OverlayFollowTarget(window);      // keep the overlay on the foreground app
     }
 }
 
@@ -345,7 +349,7 @@ DWORD WINAPI AskThread(LPVOID parameter) {
         outcome->status = S(Str::StatusAnswerReceived);
     } else {
         outcome->text = S(Str::PrefixRequestFailed) + FromUtf8(answer.error);
-        outcome->status = S(Str::StatusRequestFailed);
+        outcome->status = S(Str::StatusSolveError);
     }
     ::PostMessageW(target, WM_JOB_DONE, 0, (LPARAM)outcome.release());
     return 0;
@@ -407,32 +411,6 @@ void StartAskJob(HWND hwnd) {
     }
 }
 
-struct GhostJob {
-    HWND target;
-    HWND owner;  // main window - progress lands on its status line
-    std::wstring text;
-};
-
-// GhostType progress -> status line, throttled to whole-percent changes so a
-// long answer does not flood the message queue (runs on the worker thread).
-void GhostProgress(size_t done, size_t total, void* user) {
-    static thread_local int last_percent = -1;
-    const int percent = total ? (int)(100 * done / total) : 0;
-    if (percent == last_percent) return;
-    last_percent = percent;
-    ::PostMessageW((HWND)user, WM_APP_GHOST_PROGRESS, (WPARAM)done, (LPARAM)total);
-}
-
-// GhostType types keystroke-by-keystroke with Sleep, so it must run off the
-// UI thread. The target is the last foreground (exam) window captured by the
-// WinEvent hook; the text is the remembered answer.
-DWORD WINAPI GhostThread(LPVOID parameter) {
-    std::unique_ptr<GhostJob> job((GhostJob*)parameter);
-    x::TypeOptions opt;  // defaults: humanized delay + jitter, restore focus
-    x::GhostType(job->target, job->text, opt, GhostProgress, job->owner);
-    return 0;
-}
-
 void FinishJob(HWND hwnd, JobOutcome* raw) {
     std::unique_ptr<JobOutcome> outcome(raw);
     if (!outcome) return;
@@ -447,6 +425,9 @@ void FinishJob(HWND hwnd, JobOutcome* raw) {
         x::OverlayText(g_last_answer);
     }
     if (!outcome->status.empty()) SetStatus(outcome->status);
+    // Exe parity: with an answer in the box the status line advertises the
+    // typing hotkeys (the reference build shows this as its right-hand segment).
+    if (outcome->ok && !outcome->text.empty()) SetStatus(S(Str::StatusTypingHint));
 
     g_asking = false;
     SetBusyUi(false);
@@ -704,17 +685,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
                 return 0;
             }
             if (wparam == HK_BUFFER) {
+                // "Added to Buffer (N ss)" replaces the generic batch line for
+                // the Alt+B path; the flag is consumed by UpdateBatchUi.
+                g_buffer_status = true;
                 StartCaptureJob(hwnd, g_config.capture_mode,
                                 (::GetKeyState(VK_SHIFT) & 0x8000) != 0);
-                return 0;
-            }
-            if (wparam == HK_GHOST) {
-                if (!g_last_answer.empty() && g_last_foreign) {
-                    GhostJob* job = new GhostJob{g_last_foreign, hwnd, g_last_answer};
-                    HANDLE worker = ::CreateThread(nullptr, 0, GhostThread, job, 0, nullptr);
-                    if (worker) ::CloseHandle(worker);
-                    else delete job;
-                }
                 return 0;
             }
             break;
@@ -738,6 +713,13 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
             SetStatus(SProgress(Str::AutoProgress, (size_t)wparam, (size_t)lparam));
             return 0;
 
+        case WM_APP_XSTATUS: {
+            // Status text posted by the typing threads / Dispatch.
+            std::unique_ptr<std::wstring> text((std::wstring*)lparam);
+            if (text) SetStatus(*text);
+            return 0;
+        }
+
         case WM_JOB_CAPTURED: {
             std::unique_ptr<CaptureResult> result((CaptureResult*)lparam);
             g_capturing = false;
@@ -745,6 +727,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
             if (!result) return 0;
 
             if (result->cancelled) {
+                g_buffer_status = false;  // nothing landed in the buffer
                 SetStatus(result->error == "no region"
                               ? S(Str::StatusRegionCancelled)
                               : result->error == "no window" ? S(Str::StatusNoWindowPicked)
@@ -752,8 +735,13 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
                 return 0;
             }
             if (!result->ok) {
+                g_buffer_status = false;
+                // capture.cpp reports an all-black/blank grab as "empty area"
+                // (or an "empty PNG"); the reference build calls that out by name.
+                const bool blank = result->error == "empty area" ||
+                                   result->error == "empty PNG";
                 ReplaceAnswer(S(Str::PrefixCaptureFailed) + FromUtf8(result->error));
-                SetStatus(S(Str::StatusCaptureFailed));
+                SetStatus(S(blank ? Str::StatusBlackScreen : Str::StatusCaptureFailed));
                 LogLine("capture failed: %s", result->error.c_str());
                 return 0;
             }

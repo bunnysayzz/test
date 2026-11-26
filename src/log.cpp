@@ -55,7 +55,7 @@ LONG WINAPI CrashFilter(EXCEPTION_POINTERS* info) {
     const void* address =
         info && info->ExceptionRecord ? info->ExceptionRecord->ExceptionAddress : nullptr;
 
-    LogLine("unhandled exception code=0x%08lX at %p", code, address);
+    LogLine("CRASH: unhandled exception code=0x%08lX at %p", code, address);
 
     wchar_t stamp[64] = {};
     std::time_t now = std::time(nullptr);
@@ -88,7 +88,7 @@ LONG WINAPI CrashFilter(EXCEPTION_POINTERS* info) {
 
     // Exe parity: tell the user the crash was captured (log + summary + dump).
     wchar_t notice[160] = {};
-    swprintf_s(notice, L"Unhandled Exception 0x%08X at %p safely logged.",
+    swprintf_s(notice, L"CRASH: Unhandled Exception 0x%08X at %p safely logged.",
                (unsigned)code, address);
     ::MessageBoxW(nullptr, notice, CROWMAN_APP_NAME,
                   MB_OK | MB_ICONERROR | MB_SYSTEMMODAL | MB_SETFOREGROUND);

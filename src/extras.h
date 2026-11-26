@@ -14,6 +14,9 @@ namespace x {
 struct EnvironmentReport {
     bool safe_exam_browser, vmware, virtualbox, taskbar, program_manager;
     bool secure_desktop, rdp, debugger, debug_port, debug_object, elevated;
+    // Parity probes the reference build reports by name (HWBreakpoint,
+    // PEBDebugFlag, KernelDebug, AnalysisTool, VM_Detected).
+    bool hw_breakpoint, peb_debug_flag, kernel_debug, analysis_tool, vm_detected;
     wchar_t desktop_name[128];
     wchar_t station_name[128];
 };
@@ -47,7 +50,10 @@ size_t WalkStack(std::vector<FrameInfo>* out, size_t max);
 void SnapshotThread(HANDLE thread, CONTEXT* out);
 bool GhostType(HWND target, const std::wstring& text, const TypeOptions& opt,
                void(*progress)(size_t, size_t, void*) = nullptr, void* user = nullptr);
-bool AutoType(HWND owner, const std::wstring& text);
+bool AutoType(HWND target, const std::wstring& text);
+void SetTypingTarget(HWND target);
+void SetGhostTyping(bool on);
+bool GhostTyping();
 void PauseTyping();
 void ResumeTyping();
 void StopTyping();
@@ -69,7 +75,6 @@ std::wstring TokenGeneral();
 std::wstring TokenJava();
 std::wstring RouteName();
 std::wstring EndpointBase();
-void SetWindows(HWND main, HWND overlay);
 HWND OverlayWindow();
 void OverlayFollowTarget(HWND target);
 void OnCreate(HWND hwnd);

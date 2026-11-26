@@ -21,10 +21,6 @@ constexpr const char* kStudyPrompt =
     "If there is no question or task, say so plainly.\n"
     "Reply as plain text. Do not use markdown tables.";
 
-constexpr const char* kBrokerPrompt =
-    "Read the attached screenshots as a study aid: explain the concept, then "
-    "give the worked answer and reasoning. If there is no question, say so.";
-
 std::string ExtractText(const json::Value& doc) {
     const json::Value* choices = doc.Find("choices");
     if (!choices) return {};
@@ -126,18 +122,18 @@ AiAnswer AskStudyAssistant(const Config& cfg, const std::string& hwid,
         };
     }
 
-    // Parity / exam modes: when a solver mode is active (Alt+M/8/9/0 sets
-    // x::Mode to 1-4) build the exam-evaluator persona prompt; otherwise keep
-    // the plain study prompt.
-    std::string promptText = kStudyPrompt;
-    if (x::Mode() > 0)
-        promptText = ToUtf8(x::BuildPersonaPrompt(x::Mode(), FromUtf8(kStudyPrompt)));
+    // Parity: the reference build always sends an exam-evaluator persona, so
+    // build it for every request - the guard that used to sit here left the
+    // plain study prompt in charge until Alt+M/8/9/0 was pressed. The study
+    // prompt still rides along as BuildPersonaPrompt's `question` argument.
+    const std::string promptText =
+        ToUtf8(x::BuildPersonaPrompt(x::Mode(), FromUtf8(kStudyPrompt)));
 
     std::string body;
     if (cfg.mode == L"broker") {
         body += "{\"hwid\":" + json::Quote(hwid) + ",";
         body += "\"api_token\":" + json::Quote(ToUtf8(key)) + ",";
-        body += "\"prompt\":" + json::Quote(kBrokerPrompt) + ",";
+        body += "\"prompt\":" + json::Quote(promptText) + ",";
         body += "\"stream\":" + std::string(streaming ? "true" : "false") + ",";
         body += "\"image\":\"data:image/png;base64," + Base64Encode(pngs[0]) + "\",";
         body += "\"images\":[";

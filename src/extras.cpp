@@ -1,7 +1,8 @@
 // extras.cpp - parity features.
 // WndProc: WM_HOTKEY -> if (x::Dispatch((int)wParam - x::X_HK_BASE)) return 0;
 // WM_SIZE -> x::OnSize(LOWORD(lparam), HIWORD(lparam));
-// WM_CREATE -> x::SetWindows(hwnd, 0); x::RegisterHotkeys(hwnd);
+// WM_CREATE -> x::OnCreate(hwnd);
+// WM_APP_XSTATUS -> take the posted std::wstring* and SetStatus() it.
 // Compile /EHa.
 #include "extras.h"
 #include "app.h"  // WM_APP_AUTOTYPE / WM_APP_GHOST_PROGRESS status messages
@@ -30,7 +31,7 @@ static constexpr DWORD WDA_EXCLUDE = 0x00000011;
 inline bool SupportsExclude() { return IsWindowsVersionOrGreater(10, 0, 19041) != FALSE; }
 
 static HWND g_main = nullptr;  // main window - owns the status line we post to
-static HWND g_typing_target = nullptr;  // exam window Alt+F types into
+static HWND g_typing_target = nullptr;  // exam window Alt+G ghosts into
 static bool g_ghost_kind = false;       // current typing job: ghost vs auto
 
 // Status-line text from a worker thread (Dispatch and the typing threads run
@@ -157,9 +158,67 @@ static bool RegKeyExists(HKEY root, const wchar_t* sub) {
     if (k) RegCloseKey(k);
     return ok;
 }
-static BOOL CALLBACK DeskEnum(LPSTR name, LPARAM lp) {
-    if (name && _stricmp(name, "Disconnect") == 0) ((EnvironmentReport*)lp)->rdp = true;
+static BOOL CALLBACK DeskEnum(LPWSTR name, LPARAM lp) {
+    if (name && _wcsicmp(name, L"Disconnect") == 0) ((EnvironmentReport*)lp)->rdp = true;
     return TRUE;
+}
+
+// HWBreakpoint: any debug register armed on this thread.
+static bool HwBreakpoint() {
+    CONTEXT c{};
+    c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    if (!GetThreadContext(GetCurrentThread(), &c)) return false;
+    return c.Dr0 || c.Dr1 || c.Dr2 || c.Dr3 || (c.Dr7 & 0xFF) != 0;
+}
+
+// PEBDebugFlag: PEB->BeingDebugged plus the NtGlobalFlag heap-check bits the
+// loader only sets when a debugger is present.
+static bool PebDebugFlag() {
+    typedef LONG(NTAPI* NtQIP_t)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (!ntdll) return false;
+    auto query = (NtQIP_t)GetProcAddress(ntdll, "NtQueryInformationProcess");
+    if (!query) return false;
+    struct Pbi {
+        void* reserved1;
+        void* peb;
+        void* reserved2[2];
+        ULONG_PTR pid;
+        void* reserved3;
+    } pbi{};
+    if (query(GetCurrentProcess(), 0, &pbi, (ULONG)sizeof pbi, nullptr) != 0 ||
+        !pbi.peb)
+        return false;
+    const unsigned char* peb = (const unsigned char*)pbi.peb;
+    if (peb[2]) return true;                      // PEB.BeingDebugged
+    ULONG flags = 0;
+    memcpy(&flags, peb + 0xBC, sizeof flags);     // PEB.NtGlobalFlag (x64)
+    return (flags & 0x70u) != 0;                  // heap tail / force / validate
+}
+
+// KernelDebug: SystemKernelDebuggerInformation (0x23) = enabled and present.
+static bool KernelDebuggerOn() {
+    typedef LONG(NTAPI* NtQSI_t)(ULONG, PVOID, ULONG, PULONG);
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (!ntdll) return false;
+    auto query = (NtQSI_t)GetProcAddress(ntdll, "NtQuerySystemInformation");
+    if (!query) return false;
+    unsigned char info[2] = {};
+    ULONG len = 0;
+    if (query(0x23, info, (ULONG)sizeof info, &len) != 0) return false;
+    return info[0] != 0 && info[1] == 0;
+}
+
+// AnalysisTool: reverse-engineering / instrumentation tools running alongside.
+static bool AnalysisToolRunning() {
+    static const wchar_t* const kTools[] = {
+        L"x64dbg", L"x32dbg", L"ollydbg", L"ida64", L"idaq64", L"idaq",
+        L"windbg", L"ntsd", L"ghidra", L"processhacker", L"procmon",
+        L"procexp", L"cheatengine", L"dnspy", L"ilspy", L"de4dot", L"pebear",
+    };
+    for (const wchar_t* tool : kTools)
+        if (!ListProcesses(tool).empty()) return true;
+    return false;
 }
 
 void ProbeEnvironment(EnvironmentReport* r) {
@@ -176,16 +235,38 @@ void ProbeEnvironment(EnvironmentReport* r) {
     r->vmware = RegKeyExists(HKEY_LOCAL_MACHINE, L"SOFTWARE\\VMware, Inc.\\VMware Tools");
     r->virtualbox = RegKeyExists(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Services\\VBoxGuest");
     HDESK input = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS);
-    if (input) { DWORD n = 0; GetUserObjectInformationA(input, UOI_NAME, r->desktop_name, 128, &n); CloseDesktop(input); }
+    // W variant with a byte count: these targets are wchar_t[128], so the ANSI
+    // call used to reinterpret raw bytes as UTF-16 - the name came out as
+    // mojibake and the "Default" comparison below never matched, which left
+    // secure_desktop latched true on an ordinary desktop.
+    if (input) {
+        DWORD n = 0;
+        GetUserObjectInformationW(input, UOI_NAME, r->desktop_name,
+                                  (DWORD)sizeof r->desktop_name, &n);
+        CloseDesktop(input);
+    }
     HWINSTA sta = GetProcessWindowStation();
-    if (sta) { DWORD n = 0; GetUserObjectInformationA(sta, UOI_NAME, r->station_name, 128, &n); }
+    if (sta) {
+        DWORD n = 0;
+        GetUserObjectInformationW(sta, UOI_NAME, r->station_name,
+                                  (DWORD)sizeof r->station_name, &n);
+    }
     if (r->desktop_name[0] && _wcsicmp(r->desktop_name, L"Default") != 0) r->secure_desktop = true;
-    EnumDesktopsA(GetProcessWindowStation(), DeskEnum, (LPARAM)r);
+    EnumDesktopsW(GetProcessWindowStation(), DeskEnum, (LPARAM)r);
     r->debugger = IsDebuggerPresent() != FALSE;
     BOOL rem = FALSE; CheckRemoteDebuggerPresent(GetCurrentProcess(), &rem);
     if (rem) r->debugger = true;
     ProbeDebugPorts(r);
     r->rdp = r->rdp || GetSystemMetrics(SM_REMOTESESSION) != 0;
+    // Named probes the reference build reports: HWBreakpoint, PEBDebugFlag,
+    // KernelDebug, AnalysisTool, VM_Detected.
+    r->hw_breakpoint = HwBreakpoint();
+    r->peb_debug_flag = PebDebugFlag();
+    r->kernel_debug = KernelDebuggerOn();
+    r->analysis_tool = AnalysisToolRunning();
+    r->vm_detected = r->vmware || r->virtualbox ||
+                     RegKeyExists(HKEY_LOCAL_MACHINE, L"HARDWARE\\ACPI\\DSDT\\VBOX__") ||
+                     RegKeyExists(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Virtual Machine\\Guest");
     HANDLE tok = nullptr;
     if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok)) {
         TOKEN_ELEVATION te{}; DWORD n = 0;
@@ -195,11 +276,18 @@ void ProbeEnvironment(EnvironmentReport* r) {
 }
 
 const wchar_t* ReportLine(const EnvironmentReport& r) {
-    static wchar_t b[512];
-    swprintf_s(b, L"SEB:%s VM:%s%s desk:%s rdp:%s dbg:%s admin:%s",
+    static wchar_t b[640];
+    swprintf_s(b,
+        L"SEB:%s VM:%s%s%s desk:%s rdp:%s dbg:%s%s%s hwbp:%s peb:%s kdbg:%s "
+        L"tool:%s pm:%s admin:%s",
         r.safe_exam_browser ? L"y" : L"n", r.vmware ? L"vmware " : L"",
-        r.virtualbox ? L"vbox " : L"", r.desktop_name[0] ? r.desktop_name : L"?",
-        r.rdp ? L"y" : L"n", r.debugger ? L"y" : L"n", r.elevated ? L"y" : L"n");
+        r.virtualbox ? L"vbox " : L"", r.vm_detected ? L"vm " : L"",
+        r.desktop_name[0] ? r.desktop_name : L"?", r.rdp ? L"y" : L"n",
+        r.debugger ? L"y" : L"n", r.debug_port ? L"y" : L"n",
+        r.debug_object ? L"y" : L"n", r.hw_breakpoint ? L"y" : L"n",
+        r.peb_debug_flag ? L"y" : L"n", r.kernel_debug ? L"y" : L"n",
+        r.analysis_tool ? L"y" : L"n", r.program_manager ? L"y" : L"n",
+        r.elevated ? L"y" : L"n");
     return b;
 }
 
@@ -378,28 +466,74 @@ static bool SetClipboardText(HWND owner, const std::wstring& text) {
     HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, n);
     if (!mem) { CloseClipboard(); return false; }
     void* p = GlobalLock(mem);
+    if (!p) { GlobalFree(mem); CloseClipboard(); return false; }
     memcpy(p, text.c_str(), n);
     GlobalUnlock(mem);
-    SetClipboardData(CF_UNICODETEXT, mem);
+    if (!SetClipboardData(CF_UNICODETEXT, mem)) { GlobalFree(mem); CloseClipboard(); return false; }
     CloseClipboard();
     return true;
 }
-bool AutoType(HWND owner, const std::wstring& text) {
-    if (text.empty()) return false;
-    // Exe parity: report line progress on the status line. The paste itself is
-    // one atomic Ctrl+V, so the line counter goes 0% -> 100% around it.
-    size_t lines = 1;
-    for (wchar_t ch : text)
-        if (ch == L'\n') ++lines;
-    if (g_main) ::PostMessageW(g_main, WM_APP_AUTOTYPE, 0, (LPARAM)lines);
+// Ctrl+V of one clipboard payload.
+static bool PasteClipboard(HWND owner, const std::wstring& text) {
     if (!SetClipboardText(owner, text)) return false;
     INPUT in[4]{};
     in[0].type = INPUT_KEYBOARD; in[0].ki.wVk = VK_CONTROL;
     in[1].type = INPUT_KEYBOARD; in[1].ki.wVk = 'V';
     in[2].type = INPUT_KEYBOARD; in[2].ki.wVk = 'V'; in[2].ki.dwFlags = KEYEVENTF_KEYUP;
     in[3].type = INPUT_KEYBOARD; in[3].ki.wVk = VK_CONTROL; in[3].ki.dwFlags = KEYEVENTF_KEYUP;
-    const bool ok = Inject(in, 4);
-    if (g_main) ::PostMessageW(g_main, WM_APP_AUTOTYPE, (WPARAM)lines, (LPARAM)lines);
+    return Inject(in, 4);
+}
+// Exe parity: the line counter is real. Each line is pasted on its own, so
+// "AutoTyping: [i/N lines] (x%)" walks from 0% to 100% instead of jumping
+// 0 -> 100 around a single Ctrl+V. Runs on a worker thread (Dispatch spawns
+// it) because the per-line delay would otherwise freeze the UI thread.
+//
+// Contract mirrors GhostType: focus `target` first and bail if that fails -
+// otherwise Ctrl+V lands in whatever window happens to be foreground - then
+// hand focus back to the previous foreground window when the job finishes.
+// `g_main` is only ever the clipboard owner; it is not where we type.
+bool AutoType(HWND target, const std::wstring& text) {
+    if (text.empty()) return false;
+    if (g_typing.exchange(true)) return false;
+    g_stop.store(false); g_paused.store(false); g_fallback.store(false);
+    SetGhostTyping(false);
+
+    HWND prev = GetForegroundWindow();
+    if (!target || !FocusWindow(target)) {
+        g_typing.store(false);
+        PostStatus(S(Str::StatusTypingStopped));
+        return false;
+    }
+
+    std::vector<std::wstring> lines;
+    std::wstring line;
+    for (wchar_t ch : text) {
+        if (ch == L'\r') continue;
+        if (ch == L'\n') { lines.push_back(line); line.clear(); }
+        else line.push_back(ch);
+    }
+    lines.push_back(line);
+
+    const size_t total = lines.size();
+    PostStatus(S(Str::StatusAutoTyping));
+    if (g_main) ::PostMessageW(g_main, WM_APP_AUTOTYPE, 0, (LPARAM)total);
+
+    bool ok = true;
+    for (size_t i = 0; i < total && ok; ++i) {
+        if (g_stop.load()) { ok = false; break; }
+        while (g_paused.load() && !g_stop.load()) Sleep(20);
+        if (g_stop.load()) { ok = false; break; }
+        ok = PasteClipboard(g_main, lines[i]);
+        if (!ok) break;
+        if (i + 1 < total) {
+            TapVk(VK_RETURN);
+            if (!Wait(14)) { ok = false; break; }
+        }
+        if (g_main) ::PostMessageW(g_main, WM_APP_AUTOTYPE, (WPARAM)(i + 1), (LPARAM)total);
+    }
+    if (prev && IsWindow(prev)) { Wait(30); FocusWindow(prev); }
+    g_typing.store(false);
+    PostStatus(ok ? S(Str::StatusTypingComplete) : S(Str::StatusTypingStopped));
     return ok;
 }
 
@@ -633,20 +767,28 @@ private:
 
 static Overlay g_overlay;
 static bool g_dimmed = false, g_hidden = false;
-static int g_mode = 0;
+// Solver mode: 1=MCQ (default), 2=DSA, 3=Universal, 4=Game. The reference
+// build has no "plain study" request, so MCQ is the out-of-the-box persona.
+static int g_mode = 1;
 
-// Exe hotkey map (13 rows, strings_annotated.txt 0009ed10-0009eecf).
-// Alt+G (Ghost Type start/stop toggle) lives in main.cpp with the ghost job;
-// Alt+F/R/E here drive the typing engines.
+// Exe hotkey map (guide rows, strings_annotated.txt 0009ed10-0009eecf).
+// Alt+G is the Ghost Type start/stop toggle; Alt+F/R/E drive the typing
+// engines. Alt+T is deliberately absent from kGuide[]: the reference build
+// never documents it either, but its DSA prompt (prompts.h) tells the user to
+// "press Alt+T" to type the code, so it stays as an exact-paste alias of Alt+F.
 enum : int { HK_DIM = 0, HK_HIDE, HK_GUIDE, HK_KILL, HK_MULTI, HK_CODE,
-             HK_FULLSTACK, HK_GAME, HK_AUTOTYPE, HK_PAUSE, HK_STOP, HK_COUNT };
+             HK_FULLSTACK, HK_GAME, HK_GHOST_STOP, HK_AUTOTYPE, HK_AUTOTYPE_ALIAS,
+             HK_PAUSE, HK_STOP, HK_COUNT };
 static const struct { int id; UINT mod; UINT vk; } kHk[HK_COUNT] = {
     { HK_DIM, MOD_ALT, 'N' }, { HK_HIDE, MOD_ALT, 'D' }, { HK_GUIDE, MOD_ALT, 'I' },
     { HK_KILL, MOD_ALT | MOD_SHIFT, 'X' }, { HK_MULTI, MOD_ALT, 'M' },
     { HK_CODE, MOD_ALT, '8' }, { HK_FULLSTACK, MOD_ALT, '9' }, { HK_GAME, MOD_ALT, '0' },
-    { HK_AUTOTYPE, MOD_ALT, 'F' },
+    { HK_GHOST_STOP, MOD_ALT, 'G' }, { HK_AUTOTYPE, MOD_ALT, 'F' },
+    { HK_AUTOTYPE_ALIAS, MOD_ALT, 'T' },
     { HK_PAUSE, MOD_ALT, 'R' }, { HK_STOP, MOD_ALT, 'E' },
 };
+static_assert(sizeof kHk / sizeof kHk[0] == (size_t)HK_COUNT,
+              "hotkey table out of sync");
 
 static HWND g_overlayWnd = nullptr;
 static std::wstring g_lastAnswer;
@@ -697,6 +839,7 @@ void RememberAnswer(const std::wstring& text) { g_lastAnswer = text; }
 
 void OnCreate(HWND hwnd) {
     g_main = hwnd;
+    g_typing_target = GetForegroundWindow();  // Alt+G types into the exam window
     SetCaptureInvisible(hwnd, true);
     ShapeRounded(hwnd, 14);
     static bool reg = false;
@@ -721,6 +864,7 @@ void OnCreate(HWND hwnd) {
         WS_POPUP | WS_CLIPSIBLINGS, 0, 0, 100, 100,
         nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
     if (g_overlayWnd) {
+        SetCaptureInvisible(g_overlayWnd, true);  // never appears in a screenshot
         MARGINS glass{ -1, -1, -1, -1 };
         DwmExtendFrameIntoClientArea(g_overlayWnd, &glass);
         OverlayFollowTarget(GetForegroundWindow());  // place over the target app
@@ -743,7 +887,6 @@ void OnHotkey(HWND, int id) {
     Dispatch(n);
 }
 
-void SetWindows(HWND main, HWND overlay) { g_main = main; if (overlay) g_overlay.Init(overlay); }
 HWND OverlayWindow() { return g_overlayWnd; }
 void OnSize(UINT w, UINT h) {
     (void)w; (void)h;
@@ -751,22 +894,96 @@ void OnSize(UINT w, UINT h) {
     ShapeRounded(g_main, 14);
 }
 
+// GhostType sleeps per keystroke and AutoType pastes line by line, so both
+// engines run on a worker thread; the terminal status is posted here instead.
+struct TypeJob { HWND target; std::wstring text; bool ghost; };
+static int g_ghost_percent = -1;  // throttle ghost progress to whole percents
+
+static void GhostProgressStatus(size_t done, size_t total, void*) {
+    const int percent = total ? (int)(100 * done / total) : 0;
+    if (percent == g_ghost_percent) return;
+    g_ghost_percent = percent;
+    if (g_main) ::PostMessageW(g_main, WM_APP_GHOST_PROGRESS, (WPARAM)done, (LPARAM)total);
+}
+
+static DWORD WINAPI TypeEntry(LPVOID parameter) {
+    TypeJob* job = (TypeJob*)parameter;
+    if (job->ghost) {
+        TypeOptions opt;  // defaults: humanized delay + jitter, restore focus
+        const bool ok = GhostType(job->target, job->text, opt, GhostProgressStatus, nullptr);
+        PostStatus(ok ? S(Str::StatusGhostComplete) : S(Str::StatusGhostStopped));
+    } else {
+        AutoType(job->target, job->text);  // posts its own terminal status
+    }
+    delete job;
+    return 0;
+}
+
+static bool StartTypeJob(bool ghost) {
+    if (IsTyping()) {  // already running: point at the keys that drive it
+        if (ghost && GhostTyping())
+            PostStatus(SFormat(Str::StatusGhostActive, g_lastAnswer.size()));
+        else
+            PostStatus(S(Str::StatusTyping));
+        return true;
+    }
+    if (g_lastAnswer.empty() || !g_typing_target) {
+        PostStatus(S(Str::StatusNoCode));
+        return false;
+    }
+    if (ghost) {
+        SetGhostTyping(true);
+        g_ghost_percent = -1;
+        PostStatus(SFormat(Str::StatusGhostActive, g_lastAnswer.size()));
+    } else {
+        SetGhostTyping(false);
+    }
+    TypeJob* job = new TypeJob{g_typing_target, g_lastAnswer, ghost};
+    HANDLE thread = CreateThread(nullptr, 0, TypeEntry, job, 0, nullptr);
+    if (!thread) {
+        delete job;
+        if (ghost) SetGhostTyping(false);
+        PostStatus(S(Str::StatusNoCode));
+        return false;
+    }
+    CloseHandle(thread);
+    return true;
+}
+
 bool Dispatch(int id) {
     switch (id) {
-    case HK_DIM: g_dimmed = !g_dimmed; StealthDim(g_main, g_dimmed); return true;
+    case HK_DIM:
+        g_dimmed = !g_dimmed;
+        StealthDim(g_main, g_dimmed);
+        PostStatus(S(g_dimmed ? Str::StatusStealthDim : Str::StatusReady));
+        return true;
     case HK_HIDE: g_hidden = !g_hidden; g_hidden ? StealthHide(g_main) : StealthShow(g_main); return true;
     case HK_GUIDE: ShowKeysGuide(g_main); return true;
     case HK_KILL: EmergencyExit();
-    case HK_MULTI: g_mode = 1; return true;
-    case HK_CODE: g_mode = 2; return true;
-    case HK_FULLSTACK: g_mode = 3; return true;
-    case HK_GAME: g_mode = 4; return true;
-    case HK_GHOST_STOP: StopTyping(); return true;
+    case HK_MULTI: g_mode = 1; PostStatus(S(Str::StatusReadyMcq)); return true;
+    case HK_CODE: g_mode = 2; PostStatus(S(Str::StatusReadyCoding)); return true;
+    case HK_FULLSTACK: g_mode = 3; PostStatus(S(Str::StatusReadyUniversal)); return true;
+    case HK_GAME: g_mode = 4; PostStatus(S(Str::StatusReadyGame)); return true;
+    case HK_GHOST_STOP:  // Alt+G: start ghost typing, or stop whatever is running
+        if (IsTyping()) { StopTyping(); return true; }
+        return StartTypeJob(true);
     case HK_AUTOTYPE:
-        if (g_lastAnswer.empty()) return false;
-        return AutoType(g_main, g_lastAnswer);
-    case HK_PAUSE: g_paused.load() ? ResumeTyping() : PauseTyping(); return true;
-    case HK_STOP: StopTyping(); return true;
+    case HK_AUTOTYPE_ALIAS:  // Alt+T: same exact-paste path (prompt parity)
+        return StartTypeJob(false);
+    case HK_PAUSE:
+        if (!IsTyping()) return true;
+        if (g_paused.load()) {
+            ResumeTyping();
+            PostStatus(S(GhostTyping() ? Str::StatusGhostWaiting : Str::StatusTypingResumed));
+        } else {
+            PauseTyping();
+            PostStatus(S(GhostTyping() ? Str::StatusTypingPaused : Str::StatusPaused));
+        }
+        return true;
+    case HK_STOP:
+        if (IsTyping()) StopTyping();
+        else PostStatus(S(GhostTyping() ? Str::StatusGhostStopped : Str::StatusTypingStopped));
+        return true;
     }
     return false;
 }

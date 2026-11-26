@@ -27,7 +27,6 @@ add_executable(crowman_study WIN32
     src/settings.cpp
     src/hotkey.cpp
     src/util.cpp
-#     res/app.rc
 )
 
 target_compile_definitions(crowman_study PRIVATE

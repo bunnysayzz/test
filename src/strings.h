@@ -92,6 +92,28 @@ enum class Str {
     StatusKeySaved,
     GhostProgress,
     AutoProgress,
+    // --- parity status lines (exe .rdata 00080160-000802d0 / 000845f0-00084810) ---
+    StatusBatchAdded,      // Added to Buffer (N ss)
+    StatusStealthDim,      // Stealth Dim: 9% [Alt+N to Restore]
+    StatusTyping,          // Typing... [Alt+R: Pause | Alt+E: Stop]
+    StatusPaused,          // PAUSED [Alt+R: Resume | Alt+E: Stop]
+    StatusTypingPaused,    // Typing Paused [Alt+R to resume]
+    StatusTypingResumed,   // Typing Resumed
+    StatusTypingStopped,   // Typing Stopped
+    StatusTypingComplete,  // Typing Complete!
+    StatusGhostComplete,   // Ghost Complete!
+    StatusGhostStopped,    // GhostType Stopped
+    StatusGhostActive,     // Ghost Active (N chars) [Alt+G: Stop]
+    StatusGhostWaiting,    // Ghost Active [Type naturally | Alt+G: Stop]
+    StatusAutoTyping,      // AutoTyping in progress... [Alt+R: Pause]
+    StatusNoCode,          // No Code! Press Alt+8 or Alt+9 first
+    StatusReadyMcq,        // MCQ Ready
+    StatusReadyCoding,     // Coding Ready
+    StatusReadyUniversal,  // Universal Ready
+    StatusReadyGame,       // Game Ready
+    StatusTypingHint,      // Alt+F: Auto Typing | Alt+G: Ghost | Alt+R: Pause | Alt+E: Stop
+    StatusSolveError,      // Solve Error: Check Log
+    StatusBlackScreen,     // Error: Black Screen
     Count
 };
 

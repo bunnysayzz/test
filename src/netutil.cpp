@@ -70,7 +70,11 @@ long long ParseRetryAfter(const std::string& value) {
     tm.tm_min = std::atoi(trimmed.substr(20, 2).c_str());
     tm.tm_sec = std::atoi(trimmed.substr(23, 2).c_str());
 
+#ifdef _WIN32
     const std::time_t when = _mkgmtime(&tm);
+#else
+    const std::time_t when = timegm(&tm);  // POSIX twin of _mkgmtime
+#endif
     if (when <= 0) return 0;
     const std::time_t now = std::time(nullptr);
     return when > now ? (long long)(when - now) : 0;

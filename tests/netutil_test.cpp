@@ -15,8 +15,8 @@ int main() {
     {
         std::string buffer;
         std::vector<std::string> out;
-        FeedSseLines(buffer, "data: one\n", 9, out);
-        FeedSseLines(buffer, "data: two\n\ndata: thr", 19, out);
+        FeedSseLines(buffer, "data: one\n", 10, out);
+        FeedSseLines(buffer, "data: two\n\ndata: thr", 20, out);
         FeedSseLines(buffer, "ee\n", 3, out);
         Check(out.size() == 3, "splits lines across chunks");
         Check(out.size() == 3 && out[0] == "one" && out[2] == "three",

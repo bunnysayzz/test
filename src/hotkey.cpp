@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <cwchar>
 #include <cwctype>
 
 namespace {
@@ -83,7 +84,7 @@ bool ParseHotkey(const std::wstring& text, HotkeySpec& out) {
                 }
             if (!found) {
                 if (token.compare(0, 2, L"vk") == 0)
-                    spec.vk = (unsigned)_wtoi(token.c_str() + 2);
+                    spec.vk = (unsigned)std::wcstol(token.c_str() + 2, nullptr, 10);
                 if (!spec.vk) return false;
             }
         }
